@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 聊天助手</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <h1><i class="fas fa-robot"></i> AI 聊天助手</h1>
+                <!-- 原先的 header-controls 已移至输入区域上方 -->
+            </div>
+        </header>
+
+        <main class="main">
+            <div class="chat-container">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="welcome-message">
+                        <div class="welcome-icon">
+                            <i class="fas fa-comments"></i>
+                        </div>
+                        <h3>欢迎使用 AI 聊天助手</h3>
+                        <p>选择您喜欢的AI模型，开始愉快的对话吧！</p>
+                    </div>
+                </div>
+                
+                <div class="input-area">
+                    <!-- 新增：输入区域上方的模型选择与新建对话按钮 -->
+                    <div class="input-top-controls">
+                        <div class="model-selector">
+                            <label for="model-select">选择模型:</label>
+                            <select id="model-select">
+                                <option value="gpt-4o">GPT-4o</option>
+                                <option value="gpt-4.5-preview">GPT-4.5 Preview</option>
+                                <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                                <option value="claude-sonnet-4-20250514-thinking">Claude Sonnet 4 (Thinking)</option>
+                                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                <option value="deepseek-v3">DeepSeek V3</option>
+                                <option value="deepseek-r1">DeepSeek R1</option>
+                            </select>
+                        </div>
+                        <button id="new-chat-button" class="new-chat-button">
+                            <i class="fas fa-plus"></i> 新建对话
+                        </button>
+                    </div>
+                    <div class="input-container">
+                        <textarea 
+                            id="message-input" 
+                            placeholder="输入您的消息..." 
+                            rows="1"
+                            maxlength="4000"
+                        ></textarea>
+                        <button id="send-button" class="send-button">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <div class="input-footer">
+                        <div class="character-count">
+                            <span id="char-count">0</span> / 4000
+                        </div>
+                        <div class="input-hint">
+                            按 Enter 发送，Shift + Enter 换行
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <div class="loading-overlay" id="loading-overlay">
+            <div class="loading-spinner">
+                <div class="spinner"></div>
+                <p>AI 正在思考中...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="config.js"></script>
+    <script src="script.js"></script>
+</body>
+</html> 
