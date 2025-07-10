@@ -467,7 +467,7 @@ function createAssistantMessage() {
                 if(summaryText) summaryText.textContent = '收起AI思考过程';
             } else {
                 if(summaryIcon) summaryIcon.classList.replace('fa-chevron-down', 'fa-chevron-right');
-                if(summaryText) summaryText.textContent = '查看AI思考过程';
+                if(summaryText) summaryText.textContent = 'AI思考过程...';
             }
         }
     }, true);
@@ -509,7 +509,7 @@ function updateAssistantMessage(assistantMessageElement, content) {
             <details class="thinking-process">
                 <summary>
                     <span class="summary-icon"><i class="fas fa-chevron-right"></i></span>
-                    <span class="summary-text">查看AI思考过程</span>
+                    <span class="summary-text">AI思考过程...</span>
                 </summary>
                 <div class="thinking-content-wrapper">${thinkingHtml}</div>
             </details>
@@ -708,7 +708,7 @@ async function sendStreamChatRequest(message, assistantMessageElement) {
                     const summaryIcon = thinkingDetailsElement.querySelector('.summary-icon i');
                     const summaryText = thinkingDetailsElement.querySelector('.summary-text');
                     if(summaryIcon) summaryIcon.classList.replace('fa-chevron-down', 'fa-chevron-right');
-                    if(summaryText) summaryText.textContent = '查看AI思考过程';
+                    if(summaryText) summaryText.textContent = 'AI思考过程...';
                 }
             }
             if (mainContentElement) {
