@@ -1,7 +1,7 @@
 // 配置
 const CONFIG = {
     API_URL: 'https://api.laozhang.ai/v1/chat/completions',
-    API_KEY: typeof APP_CONFIG !== 'undefined' ? APP_CONFIG.API_KEY : '',
+    API_KEY: '', // 将在初始化时从 localStorage 获取
     MAX_RETRIES: 3,
     RETRY_DELAY: 1000
 };
@@ -10,21 +10,51 @@ const CONFIG = {
 let chatHistory = [];
 let isWaitingForResponse = false;
 let streamController = null; // 新增：用于中止流式请求
+let activeRequestControllers = []; // 用于管理多个并行请求的 AbortController
+
+// --- 新增：自定义模型选择器所需变量 ---
+const MAX_MODELS_SELECTABLE = 3;
+const availableModels = [
+    { id: 'gpt-4o', name: 'GPT-4o' },
+    { id: 'gpt-4.5-preview', name: 'GPT-4.5 Preview' },
+    { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
+    { id: 'claude-sonnet-4-20250514-thinking', name: 'Claude Sonnet 4 (Thinking)' },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+    { id: 'deepseek-v3', name: 'DeepSeek V3' },
+    { id: 'deepseek-r1', name: 'DeepSeek R1' }
+];
+let selectedModels = ['gpt-4o']; // 默认选择的模型
 
 // DOM 元素
 const elements = {
     chatMessages: document.getElementById('chat-messages'),
     messageInput: document.getElementById('message-input'),
     sendButton: document.getElementById('send-button'),
-    modelSelect: document.getElementById('model-select'),
+    modelSelect: document.getElementById('custom-model-select'), // 更新为自定义选择器的容器
+    modelSelectHeader: document.getElementById('model-select-header'),
+    modelSelectList: document.getElementById('model-select-list'),
+    modelSelectText: document.querySelector('#model-select-header .select-text'),
     loadingOverlay: document.getElementById('loading-overlay'),
     charCount: document.getElementById('char-count'),
-    newChatButton: document.getElementById('new-chat-button')
+    newChatButton: document.getElementById('new-chat-button'),
+    // --- 新增：设置弹窗元素 ---
+    settingsButton: document.getElementById('settings-button'),
+    settingsModal: document.getElementById('settings-modal'),
+    apiKeyInput: document.getElementById('api-key-input'),
+    saveSettingsButton: document.getElementById('save-settings-button'),
+    cancelSettingsButton: document.getElementById('cancel-settings-button')
 };
 
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
-    if (typeof APP_CONFIG === 'undefined' || !APP_CONFIG.API_KEY) {
+    // 优先从 localStorage 加载 API Key
+    const savedApiKey = localStorage.getItem('laozhang_api_key');
+    if (savedApiKey) {
+        CONFIG.API_KEY = savedApiKey;
+        elements.apiKeyInput.value = savedApiKey;
+    }
+
+    if (!CONFIG.API_KEY) {
         showMissingConfigWarning();
     }
     initializeApp();
@@ -34,22 +64,20 @@ function showMissingConfigWarning() {
     const warningElement = document.createElement('div');
     warningElement.className = 'config-warning';
     warningElement.innerHTML = `
-        <strong>配置警告:</strong> 未找到 API 密钥。请按照以下步骤操作：<br>
-        1. 将 <code>config.example.js</code> 文件复制并重命名为 <code>config.js</code>。<br>
-        2. 在 <code>config.js</code> 文件中填入您的有效 API 密钥。<br>
-        3. 刷新页面。
+        <strong>配置警告:</strong> 未设置 API 密钥。请点击右下角的 <i class="fas fa-cog"></i> 按钮进行设置。
     `;
     document.body.prepend(warningElement);
     
     // 禁用输入功能
     elements.messageInput.disabled = true;
     elements.sendButton.disabled = true;
-    elements.modelSelect.disabled = true;
-    elements.messageInput.placeholder = '请先在 config.js 中配置 API Key';
+    elements.modelSelect.classList.add('disabled'); // 使用class来禁用自定义选择器
+    elements.messageInput.placeholder = '请先设置 API Key';
 }
 
 function initializeApp() {
     setupEventListeners();
+    setupCustomModelSelect(); // 新增：初始化自定义选择器
     adjustTextareaHeight();
     updateCharCount();
 }
@@ -67,14 +95,129 @@ function setupEventListeners() {
         updateCharCount();
     });
     
-    // 模型选择变化事件
-    elements.modelSelect.addEventListener('change', function() {
-        console.log('模型已切换为:', this.value);
-    });
-    
     // 新建对话按钮点击事件
     elements.newChatButton.addEventListener('click', handleNewChat);
+
+    // --- 新增：设置弹窗事件 ---
+    elements.settingsButton.addEventListener('click', () => {
+        elements.settingsModal.style.display = 'flex';
+    });
+
+    elements.cancelSettingsButton.addEventListener('click', () => {
+        elements.settingsModal.style.display = 'none';
+    });
+
+    elements.saveSettingsButton.addEventListener('click', () => {
+        const newApiKey = elements.apiKeyInput.value.trim();
+        if (newApiKey) {
+            CONFIG.API_KEY = newApiKey;
+            localStorage.setItem('laozhang_api_key', newApiKey);
+            elements.settingsModal.style.display = 'none';
+            
+            // 如果之前因为没有key而禁用了，现在就启用它们
+            if (elements.messageInput.disabled) {
+                elements.messageInput.disabled = false;
+                elements.sendButton.disabled = false;
+                elements.modelSelect.classList.remove('disabled');
+                elements.messageInput.placeholder = '输入您的消息...';
+                
+                // 移除顶部的警告信息
+                const warning = document.querySelector('.config-warning');
+                if (warning) {
+                    warning.remove();
+                }
+            }
+        } else {
+            alert('API Key 不能为空。');
+        }
+    });
+
+    // --- 新增：自定义模型选择器事件 ---
+    elements.modelSelectHeader.addEventListener('click', () => {
+        // 如果选择器被禁用，则不响应点击
+        if(elements.modelSelect.classList.contains('disabled')) return;
+        elements.modelSelect.classList.toggle('open');
+    });
+
+    // 点击外部关闭下拉列表
+    document.addEventListener('click', (e) => {
+        if (!elements.modelSelect.contains(e.target)) {
+            elements.modelSelect.classList.remove('open');
+        }
+    });
 }
+
+function setupCustomModelSelect() {
+    elements.modelSelectList.innerHTML = ''; // 清空
+    availableModels.forEach(model => {
+        const item = document.createElement('div');
+        item.className = 'select-list-item';
+        item.dataset.value = model.id;
+        item.innerHTML = `
+            <input type="checkbox" id="model-${model.id}" ${selectedModels.includes(model.id) ? 'checked' : ''}>
+            <label for="model-${model.id}">${model.name}</label>
+        `;
+        elements.modelSelectList.appendChild(item);
+
+        item.addEventListener('click', (e) => {
+            e.stopPropagation(); // 防止点击穿透到外部关闭事件
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            
+            // 如果点击的是label，手动切换checkbox状态
+            if (e.target.tagName === 'LABEL') {
+                checkbox.checked = !checkbox.checked;
+            }
+
+            const isChecked = checkbox.checked;
+            const modelId = item.dataset.value;
+
+            if (isChecked && selectedModels.length >= MAX_MODELS_SELECTABLE) {
+                checkbox.checked = false; // 阻止选择
+                alert(`最多只能选择 ${MAX_MODELS_SELECTABLE} 个模型`);
+                return;
+            }
+
+            updateSelectedModels(modelId, isChecked);
+        });
+    });
+    updateModelSelectUI();
+}
+
+function updateSelectedModels(modelId, isSelected) {
+    if (isSelected) {
+        if (!selectedModels.includes(modelId)) {
+            selectedModels.push(modelId);
+        }
+    } else {
+        selectedModels = selectedModels.filter(id => id !== modelId);
+    }
+    updateModelSelectUI();
+}
+
+function updateModelSelectUI() {
+    // 更新头部显示
+    if (selectedModels.length === 0) {
+        elements.modelSelectText.textContent = '- 请选择模型 -';
+    } else {
+        elements.modelSelectText.textContent = selectedModels.map(id => getModelDisplayName(id)).join(', ');
+    }
+
+    // 更新列表项状态
+    const items = elements.modelSelectList.querySelectorAll('.select-list-item');
+    const limitReached = selectedModels.length >= MAX_MODELS_SELECTABLE;
+
+    items.forEach(item => {
+        const checkbox = item.querySelector('input[type="checkbox"]');
+        if (!checkbox.checked && limitReached) {
+            item.classList.add('disabled');
+            checkbox.disabled = true;
+        } else {
+            item.classList.remove('disabled');
+            checkbox.disabled = false;
+        }
+    });
+}
+
 
 function handleSendOrStop() {
     if (isWaitingForResponse) {
@@ -147,84 +290,158 @@ function startNewChat() {
 
 async function handleSendMessage() {
     const message = elements.messageInput.value.trim();
-    
-    if (!message || isWaitingForResponse) {
+
+    if (!message || isWaitingForResponse || selectedModels.length === 0) {
+        if (selectedModels.length === 0) {
+            alert('请至少选择一个模型');
+        }
         return;
     }
-    
-    // 新增：为本次请求创建新的 AbortController
+
+    isWaitingForResponse = true; // 设置全局等待状态
+    // 为本次所有请求创建一个总的 AbortController
     streamController = new AbortController();
 
-    // 隐藏欢迎消息
     const welcomeMessage = document.querySelector('.welcome-message');
     if (welcomeMessage) {
         welcomeMessage.style.display = 'none';
     }
-    
-    // 添加用户消息
+
     addMessage('user', message);
-    
-    // 清空输入框
     elements.messageInput.value = '';
     updateCharCount();
     adjustTextareaHeight();
-    
-    // 禁用输入
     setInputDisabled(true);
-    
-    // 显示思考动画
-    const thinkingElement = showThinkingAnimation();
-    
-    try {
-        // 移除思考动画
-        removeThinkingAnimation(thinkingElement);
-        
-        // 创建AI回复消息容器
-        const assistantMessageElement = createAssistantMessage();
-        
-        let response;
-        if (typeof ReadableStream !== 'undefined' && typeof TextDecoder !== 'undefined') {
-            response = await sendStreamChatRequest(message, assistantMessageElement);
-        } else {
-            console.warn('浏览器不支持流式输出，使用非流式模式');
-            response = await sendChatRequest(message);
-        }
 
-        // 如果不是用户主动中止，才处理后续逻辑
-        if (response && !response.isAborted) {
-            if (response.content) {
-                // 如果是流式响应，UI已经在内部更新，这里只需要更新历史记录
-                if (!response.isStream) {
-                    updateAssistantMessage(assistantMessageElement, response.content);
-                }
-                
-                chatHistory.push({
-                    role: 'assistant',
-                    content: response.content,
-                    timestamp: assistantMessageElement.timestamp
-                });
-                
-                if (chatHistory.length > 20) {
-                    chatHistory = chatHistory.slice(-20);
-                }
-            } else {
-                updateAssistantMessage(assistantMessageElement, '抱歉，我无法生成回复。请稍后再试。');
-            }
-        }
-        
+    // 创建一个包含所有模型回答的容器
+    createMultiResponseContainer(selectedModels);
+    
+    // 为每个选定的模型启动一个并行的聊天请求
+    const chatPromises = selectedModels.map(modelId => {
+        const multiResponseContainer = document.querySelector('.multi-response:last-child');
+        const singleResponseContainer = multiResponseContainer.querySelector(`.response-container[data-model="${modelId}"]`);
+        return handleSingleChatRequest(modelId, message, singleResponseContainer);
+    });
+
+    try {
+        await Promise.all(chatPromises);
     } catch (error) {
-        // 这个 catch 现在只处理真正的、未预料到的错误
-        console.error('发送消息失败:', error);
-        removeThinkingAnimation(thinkingElement);
-        addMessage('assistant', '抱歉，发生了意外错误。请检查控制台获取更多信息。');
+        if (error.name !== 'AbortError') {
+            console.error('处理多个请求时发生意外错误:', error);
+            // 可以在这里添加一个总的错误提示
+        }
     } finally {
         setInputDisabled(false);
-        elements.messageInput.focus();
-        streamController = null; // 重置 controller
+        streamController = null;
+        activeRequestControllers = []; // 清空控制器
+        console.log("所有模型响应结束");
     }
 }
 
+function createMultiResponseContainer(modelIds) {
+    const multiContainer = document.createElement('div');
+    multiContainer.className = 'message assistant multi-response';
+
+    const gridContainer = document.createElement('div');
+    gridContainer.className = 'responses-grid';
+    gridContainer.style.gridTemplateColumns = `repeat(${modelIds.length}, 1fr)`;
+
+    modelIds.forEach(modelId => {
+        const responseContainer = document.createElement('div');
+        responseContainer.className = 'response-container';
+        responseContainer.setAttribute('data-model', modelId);
+
+        const modelHeader = document.createElement('div');
+        modelHeader.className = 'response-header';
+        modelHeader.innerHTML = `
+            <span class="model-name">${getModelDisplayName(modelId)}</span>
+            <div class="response-actions">
+                <button class="copy-button" title="复制"><i class="fas fa-copy"></i></button>
+            </div>
+        `;
+
+        const messageContent = document.createElement('div');
+        messageContent.className = 'message-content';
+        
+        const thinkingElement = document.createElement('div');
+        thinkingElement.className = 'thinking-animation';
+        thinkingElement.innerHTML = '<div class="spinner"></div>';
+        
+        messageContent.appendChild(thinkingElement);
+        responseContainer.appendChild(modelHeader);
+        responseContainer.appendChild(messageContent);
+        gridContainer.appendChild(responseContainer);
+    });
+
+    multiContainer.appendChild(gridContainer);
+    elements.chatMessages.appendChild(multiContainer);
+    scrollToBottom();
+    
+    // 为复制按钮添加事件监听
+    multiContainer.querySelectorAll('.copy-button').forEach(button => {
+        button.addEventListener('click', (e) => {
+            const content = e.target.closest('.response-container').querySelector('.message-text').innerText;
+            navigator.clipboard.writeText(content).then(() => {
+                const icon = e.target.closest('.copy-button').querySelector('i');
+                icon.className = 'fas fa-check';
+                setTimeout(() => {
+                    icon.className = 'fas fa-copy';
+                }, 1500);
+            });
+        });
+    });
+
+
+    return multiContainer;
+}
+
+async function handleSingleChatRequest(modelId, message, container) {
+    const messageContent = container.querySelector('.message-content');
+    
+    try {
+        const response = await sendStreamChatRequest(message, container, modelId);
+
+        if (response && !response.isAborted) {
+            // 流式处理已在 sendStreamChatRequest 内部完成
+            // 更新聊天历史
+            chatHistory.push({
+                role: 'assistant',
+                content: response.content,
+                model: modelId,
+                timestamp: new Date().toISOString()
+            });
+
+             // 清理工作（例如移除加载动画）已在 sendStreamChatRequest 中处理
+        } else {
+             // 用户中止或发生错误
+            const thinkingAnimation = container.querySelector('.thinking-animation');
+            if (thinkingAnimation) thinkingAnimation.remove();
+            if (!container.querySelector('.message-text')) {
+                const errorText = document.createElement('div');
+                errorText.className = 'message-text error';
+                errorText.textContent = response.isAborted ? '已停止' : '加载失败';
+                messageContent.appendChild(errorText);
+            }
+        }
+    } catch (error) {
+        const thinkingAnimation = container.querySelector('.thinking-animation');
+        if (thinkingAnimation) thinkingAnimation.remove();
+        
+        const errorText = document.createElement('div');
+        errorText.className = 'message-text error';
+        errorText.textContent = `请求 ${getModelDisplayName(modelId)} 出错了`;
+        messageContent.appendChild(errorText);
+        console.error(`模型 ${modelId} 请求失败:`, error);
+    }
+}
+
+
 function addMessage(role, content) {
+    if (role === 'assistant') {
+        // AI 的消息由新的 multi-response 容器处理
+        return;
+    }
+
     const timestamp = new Date().toLocaleTimeString('zh-CN', {
         hour: '2-digit',
         minute: '2-digit'
@@ -243,12 +460,16 @@ function addMessage(role, content) {
     const formattedContent = formatMessageContent(content);
     textElement.innerHTML = formattedContent;
     
-    const timeElement = document.createElement('div');
-    timeElement.className = 'message-time';
-    timeElement.textContent = timestamp;
-    
-    contentElement.appendChild(textElement);
-    contentElement.appendChild(timeElement);
+    // 只为非用户消息添加时间
+    if (role !== 'user') {
+        const timeElement = document.createElement('div');
+        timeElement.className = 'message-time';
+        timeElement.textContent = timestamp;
+        contentElement.appendChild(textElement);
+        contentElement.appendChild(timeElement);
+    } else {
+        contentElement.appendChild(textElement);
+    }
     messageElement.appendChild(contentElement);
     
     elements.chatMessages.appendChild(messageElement);
@@ -345,6 +566,83 @@ function formatMessageContent(content) {
     return fallbackFormatContent(content);
 }
 
+function updateMessageWithThinking(messageContent, fullContent, explicitThinkingText, shouldCollapse = false) {
+    const thinkStartTag = '<think>';
+    const thinkEndTag = '</think>';
+    
+    let thinkingText = explicitThinkingText || '';
+    let answerText = fullContent;
+
+    // 如果没有通过独立字段传入思考文本（例如 Gemini 模型）
+    if (!explicitThinkingText) {
+        const endPos = fullContent.indexOf(thinkEndTag);
+        // 检查是否以思考标签开头
+        if (fullContent.startsWith(thinkStartTag)) {
+            if (endPos > -1) {
+                // 情况1: 思考过程已结束 (找到了结束标签)
+                thinkingText = fullContent.substring(thinkStartTag.length, endPos);
+                answerText = fullContent.substring(endPos + thinkEndTag.length).trim();
+            } else {
+                // 情况2: 思考过程正在进行中 (只找到了开始标签)
+                thinkingText = fullContent.substring(thinkStartTag.length);
+                answerText = ''; // 正式答案此时应为空
+            }
+        }
+    } 
+    // 对于 Claude 或其他模型，如果 fullContent 中意外包含了 think 标签，也清理一下
+    else if (fullContent.includes(thinkEndTag)) {
+        answerText = fullContent.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+    }
+
+    // --- 渲染逻辑 ---
+
+    // 管理思考过程容器
+    let thinkingContainer = messageContent.querySelector('.thinking-process');
+    if (thinkingText) {
+        if (!thinkingContainer) {
+            thinkingContainer = document.createElement('div');
+            thinkingContainer.className = 'thinking-process collapsible';
+            thinkingContainer.innerHTML = `
+                <div class="collapsible-header">
+                    <i class="fas fa-brain"></i>
+                    <span>思考过程</span>
+                    <i class="fas fa-chevron-down toggle-icon"></i>
+                </div>
+                <div class="collapsible-content"></div>
+            `;
+            messageContent.prepend(thinkingContainer);
+
+            thinkingContainer.querySelector('.collapsible-header').addEventListener('click', () => {
+                thinkingContainer.classList.toggle('collapsed');
+            });
+        }
+        thinkingContainer.querySelector('.collapsible-content').innerHTML = marked.parse(thinkingText);
+        
+        // 新增：如果收到指令，就折叠思考过程
+        if (shouldCollapse) {
+            thinkingContainer.classList.add('collapsed');
+        }
+
+    } else if (thinkingContainer) {
+        thinkingContainer.remove();
+    }
+    
+    // 管理最终答案容器
+    let answerContainer = messageContent.querySelector('.message-text');
+    if (answerText) {
+        if (!answerContainer) {
+            answerContainer = document.createElement('div');
+            answerContainer.className = 'message-text';
+            messageContent.appendChild(answerContainer);
+        }
+        answerContainer.innerHTML = marked.parse(answerText);
+    } else if (answerContainer) {
+        // 如果没有答案文本了（例如，在思考过程中），确保答案容器是空的
+        answerContainer.innerHTML = '';
+    }
+}
+
+
 // 备用的简单格式化函数
 function fallbackFormatContent(content) {
     // 处理代码块
@@ -416,174 +714,56 @@ function removeThinkingAnimation(thinkingElement) {
 }
 
 function createAssistantMessage() {
-    const timestamp = new Date().toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-    
-    const messageElement = document.createElement('div');
-    messageElement.className = 'message assistant';
-    
-    const contentElement = document.createElement('div');
-    contentElement.className = 'message-content';
-    
-    const textElement = document.createElement('div');
-    textElement.className = 'message-text streaming';  // 添加streaming类
-    
-    // 添加加载动画
-    const loadingElement = document.createElement('div');
-    loadingElement.className = 'message-loading';
-    loadingElement.innerHTML = `
-        <span>正在思考</span>
-        <div class="message-loading-dots">
-            <div class="message-loading-dot"></div>
-            <div class="message-loading-dot"></div>
-            <div class="message-loading-dot"></div>
-        </div>
-    `;
-    
-    textElement.appendChild(loadingElement);
-    
-    const timeElement = document.createElement('div');
-    timeElement.className = 'message-time';
-    timeElement.textContent = timestamp;
-    
-    contentElement.appendChild(textElement);
-    contentElement.appendChild(timeElement);
-    messageElement.appendChild(contentElement);
-    
-    elements.chatMessages.appendChild(messageElement);
-    scrollToBottom();
-    
-    // 为 details 元素添加事件委托
-    textElement.addEventListener('toggle', (event) => {
-        if (event.target.classList.contains('thinking-process')) {
-            const detailsElement = event.target;
-            const summaryIcon = detailsElement.querySelector('.summary-icon i');
-            const summaryText = detailsElement.querySelector('.summary-text');
-            
-            if (detailsElement.open) {
-                if(summaryIcon) summaryIcon.classList.replace('fa-chevron-right', 'fa-chevron-down');
-                if(summaryText) summaryText.textContent = '收起AI思考过程';
-            } else {
-                if(summaryIcon) summaryIcon.classList.replace('fa-chevron-down', 'fa-chevron-right');
-                if(summaryText) summaryText.textContent = 'AI思考过程...';
-            }
-        }
-    }, true);
-    
-    return {
-        element: messageElement,
-        textElement: textElement,
-        loadingElement: loadingElement,
-        timestamp: timestamp,
-        hasContent: false
-    };
+    // 这个函数的功能现在被 createMultiResponseContainer 和 handleSingleChatRequest 替代
+    // 保留以防万一有旧代码调用，但它不应该再被主要流程使用
+    console.warn("createAssistantMessage is deprecated");
+    return document.createElement('div');
 }
 
 function updateAssistantMessage(assistantMessageElement, content) {
-    // 如果是第一次收到内容，移除加载动画
-    if (!assistantMessageElement.hasContent) {
-        assistantMessageElement.hasContent = true;
-        if (assistantMessageElement.loadingElement) {
-            assistantMessageElement.loadingElement.remove();
-        }
-        assistantMessageElement.textElement.innerHTML = '';
-    }
-
-    // 新增：处理 <thinking> 逻辑
-    const thinkingRegex = /<thinking>([\s\S]*?)<\/thinking>/;
-    const match = content.match(thinkingRegex);
-    let finalHtml = '';
-
-    if (match) {
-        const thinkingContent = match[1];
-        const mainContent = content.replace(thinkingRegex, '').trim();
-
-        // 分别解析 markdown
-        const thinkingHtml = formatMessageContent(thinkingContent);
-        const mainHtml = formatMessageContent(mainContent);
-
-        // 创建 <details> 结构
-        finalHtml = `
-            <details class="thinking-process">
-                <summary>
-                    <span class="summary-icon"><i class="fas fa-chevron-right"></i></span>
-                    <span class="summary-text">AI思考过程...</span>
-                </summary>
-                <div class="thinking-content-wrapper">${thinkingHtml}</div>
-            </details>
-            ${mainHtml}
-        `;
-    } else {
-        // 如果没有思考块，或标签不完整，则正常解析
-        finalHtml = formatMessageContent(content);
-    }
-
-    assistantMessageElement.textElement.innerHTML = finalHtml;
-
-    // 每次内容更新后自动滚动到底部
-    scrollToBottom();
+    // 这个函数的功能现在被 sendStreamChatRequest 内部的流式更新替代
+     console.warn("updateAssistantMessage is deprecated");
 }
 
 function setInputDisabled(disabled) {
     isWaitingForResponse = disabled;
     elements.messageInput.disabled = disabled;
-    elements.sendButton.disabled = false; // 按钮始终可用，以便点击停止
-    elements.modelSelect.disabled = disabled;
-    
+    elements.modelSelectHeader.style.pointerEvents = disabled ? 'none' : 'auto';
+    elements.modelSelect.style.opacity = disabled ? 0.7 : 1;
+    elements.newChatButton.disabled = disabled;
+
     if (disabled) {
         elements.sendButton.innerHTML = '<i class="fas fa-stop"></i>';
         elements.sendButton.title = '停止生成';
-        elements.sendButton.classList.add('stop-button');
     } else {
         elements.sendButton.innerHTML = '<i class="fas fa-paper-plane"></i>';
         elements.sendButton.title = '发送';
-        elements.sendButton.classList.remove('stop-button');
     }
 }
 
 // 保留showLoading函数以防需要全屏加载提示
 function showLoading(show) {
-    if (show) {
-        elements.loadingOverlay.classList.add('show');
-    } else {
-        elements.loadingOverlay.classList.remove('show');
-    }
+    // 这个函数现在由每个响应单元的 thinking animation 替代
+    console.warn("showLoading is deprecated");
 }
 
-async function sendStreamChatRequest(message, assistantMessageElement) {
-    const selectedModel = elements.modelSelect.value;
+async function sendStreamChatRequest(message, container, modelId) {
+    const messageContent = container.querySelector('.message-content');
+    const thinkingAnimation = container.querySelector('.thinking-animation');
     
-    // 构建完整的对话历史
-    const messages = [];
+    const requestBody = {
+        model: modelId,
+        messages: [
+            ...chatHistory,
+            { role: 'user', content: message }
+        ],
+        stream: true
+    };
     
-    // 添加历史对话
-    for (const historyItem of chatHistory) {
-        if (historyItem.role === 'user' || historyItem.role === 'assistant') {
-            messages.push({
-                role: historyItem.role,
-                content: historyItem.content
-            });
-        }
-    }
-    
-    // 添加当前用户消息
-    messages.push({
-        role: 'user',
-        content: message
-    });
-    
-    // -----------------------------
-    // 提前声明，用于 try/catch 块共享
-    let isInsideThinkingBlock = false;
-    let thinkingContent = '';
-    let mainContent = '';
-
-    let thinkingDetailsElement = null;
-    let thinkingWrapperElement = null;
-    let mainContentElement = null;
-    // -----------------------------
+    let fullContent = '';
+    let thinkingText = ''; // 新增：专门用于存储思考过程的文本
+    let isAborted = false;
+    let thinkingCompleted = false; // 新增状态锁
 
     try {
         const response = await fetch(CONFIG.API_URL, {
@@ -592,227 +772,122 @@ async function sendStreamChatRequest(message, assistantMessageElement) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${CONFIG.API_KEY}`
             },
-            body: JSON.stringify({
-                model: selectedModel,
-                messages: messages,
-                temperature: 0.7,
-                max_tokens: 2000,
-                stream: true  // 启用流式响应
-            }),
-            signal: streamController.signal // 传递 signal
+            body: JSON.stringify(requestBody),
+            signal: streamController.signal
         });
         
+        if (thinkingAnimation) {
+            thinkingAnimation.remove();
+        }
+
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            const errorData = await response.json().catch(() => ({}));
+            const errorMessage = errorData.error?.message || `HTTP 错误: ${response.status}`;
+            throw new Error(errorMessage);
         }
-        
+
         const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder('utf-8');
         
-        // --- 新的流式处理逻辑 ---
-        // (原本 try 块内部重复的声明已删除，使用顶部的变量)
-
-        const parentContainer = assistantMessageElement.textElement;
-        
-        // 清理并准备容器
-        if (assistantMessageElement.loadingElement) {
-            assistantMessageElement.loadingElement.remove();
-        }
-        parentContainer.innerHTML = ''; // 清空父容器
-        parentContainer.classList.remove('streaming');
-
         while (true) {
-            const { value, done } = await reader.read();
+            const { done, value } = await reader.read();
             if (done) break;
             
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n').filter(line => line.trim());
             
             for (const line of lines) {
                 if (line.startsWith('data: ')) {
-                    const jsonStr = line.slice(6).trim();
-                    if (jsonStr === '[DONE]' || jsonStr === '') continue;
-                    
+                    const data = line.substring(6);
+                    if (data === '[DONE]') {
+                        break;
+                    }
                     try {
-                        const data = JSON.parse(jsonStr);
+                        const json = JSON.parse(data);
                         
-                        if (data.choices && data.choices[0] && data.choices[0].delta) {
-                            const delta = data.choices[0].delta;
-
-                            // --- 通用逻辑：兼容 reasoning 字段和 <think> 标签 ---
+                        const delta = json.choices[0]?.delta;
+                        if (delta) {
+                            let justCompletedThinking = false;
                             
-                            // 1. 处理 DeepSeek/Claude 风格的 reasoning 字段
-                            const reasoningChunk = delta.reasoning || delta.reasoning_content;
-                            if (reasoningChunk) {
-                                thinkingContent += reasoningChunk;
+                            // 记录更新前的状态
+                            const oldFullContent = fullContent;
+                            const oldThinkingTextLength = thinkingText.length;
+                            
+                            // 检查并累加最终答案
+                            if (delta.content) {
+                                fullContent += delta.content;
+                            }
+                            // 检查并累加思考过程（兼容 deepseek-r1 的 'reasoning' 和 claude 的 'reasoning_content'）
+                            if (delta.reasoning) {
+                                thinkingText += delta.reasoning;
+                            } else if (delta.reasoning_content) {
+                                thinkingText += delta.reasoning_content;
+                            }
+ 
+                            if (!thinkingCompleted) {
+                                // 条件1: Claude/DeepSeek类模型 - 思考区已有内容，且主回答区刚开始有内容
+                                const isVendorApiTransition = oldThinkingTextLength > 0 && fullContent.length > 0 && oldFullContent.length === 0;
+                                // 条件2: Gemini类模型 - 思考结束标签刚出现
+                                const isGeminiTransition = fullContent.includes('</think>') && !oldFullContent.includes('</think>');
+ 
+                                if (isVendorApiTransition || isGeminiTransition) {
+                                    justCompletedThinking = true;
+                                    thinkingCompleted = true; // 锁定状态，防止重复触发
+                                }
                             }
 
-                            // 2. 处理 Gemini 风格的 <think> 标签及主要内容
-                            let contentChunk = delta.content || '';
-                            if (contentChunk) {
-                                if (contentChunk.includes('<think>')) {
-                                    isInsideThinkingBlock = true;
-                                    contentChunk = contentChunk.replace(/<think>/g, '');
-                                }
-                                
-                                if (isInsideThinkingBlock) {
-                                    if (contentChunk.includes('</think>')) {
-                                        isInsideThinkingBlock = false;
-                                        const parts = contentChunk.split('</think>');
-                                        thinkingContent += parts[0];
-                                        mainContent += parts[1] || '';
-                                    } else {
-                                        thinkingContent += contentChunk;
-                                    }
-                                } else {
-                                    // DeepSeek 的最终回答也会进入这里
-                                    mainContent += contentChunk;
-                                }
-                            }
+                            // 更新UI
+                            updateMessageWithThinking(messageContent, fullContent, thinkingText, justCompletedThinking);
                         }
                     } catch (e) {
-                        console.warn('解析流式数据失败:', e, '原始数据:', jsonStr);
+                        console.error('解析流数据失败:', e, '原始数据:', data);
                     }
                 }
             }
-            
-            // --- 实时、独立地更新UI ---
-            // 1. 更新思考过程区域
-            if (thinkingContent && !thinkingDetailsElement) {
-                thinkingDetailsElement = document.createElement('details');
-                thinkingDetailsElement.className = 'thinking-process';
-                thinkingDetailsElement.open = true; // 在流式传输时保持打开
-                thinkingDetailsElement.innerHTML = `
-                    <summary>
-                        <span class="summary-icon"><i class="fas fa-chevron-down"></i></span>
-                        <span class="summary-text">AI 思考中...</span>
-                    </summary>
-                    <div class="thinking-content-wrapper"></div>
-                `;
-                parentContainer.insertBefore(thinkingDetailsElement, parentContainer.firstChild);
-                thinkingWrapperElement = thinkingDetailsElement.querySelector('.thinking-content-wrapper');
-            }
-            if (thinkingWrapperElement) {
-                thinkingWrapperElement.innerHTML = formatMessageContent(thinkingContent);
-            }
-
-            // 2. 更新主要回答区域
-            if (mainContent && !mainContentElement) {
-                mainContentElement = document.createElement('div');
-                mainContentElement.className = 'main-content-wrapper streaming';
-                parentContainer.appendChild(mainContentElement);
-
-                // [新增] 当主要内容开始输出时，立即折叠思考过程
-                if (thinkingDetailsElement) {
-                    thinkingDetailsElement.open = false;
-                    const summaryIcon = thinkingDetailsElement.querySelector('.summary-icon i');
-                    const summaryText = thinkingDetailsElement.querySelector('.summary-text');
-                    if(summaryIcon) summaryIcon.classList.replace('fa-chevron-down', 'fa-chevron-right');
-                    if(summaryText) summaryText.textContent = 'AI思考过程...';
-                }
-            }
-            if (mainContentElement) {
-                mainContentElement.innerHTML = formatMessageContent(mainContent);
-            }
-            
             scrollToBottom();
         }
-        
-        // --- 流式传输结束后的清理工作 ---
-        if (mainContentElement) {
-            mainContentElement.classList.remove('streaming'); // 停止光标闪烁
-        }
 
-        // 如果只有思考过程，则更新标题
-        if (thinkingDetailsElement && !mainContent.trim()) {
-            const summaryText = thinkingDetailsElement.querySelector('.summary-text');
-            if(summaryText) summaryText.textContent = 'AI 思考过程';
-        } else if (thinkingDetailsElement && streamController && streamController.signal.aborted) {
-            // 如果被中止了，也更新一下标题
-            const summaryText = thinkingDetailsElement.querySelector('.summary-text');
-            if(summaryText) summaryText.textContent = 'AI 思考过程 (已中止)';
-        }
-
-        // 组合最终内容存入历史记录，以便重新渲染
-        const finalAssistantContent = thinkingContent ? `<thinking>${thinkingContent}</thinking>${mainContent}` : mainContent;
-        
-        if (!finalAssistantContent.trim()) {
-            updateAssistantMessage(assistantMessageElement, '抱歉，我没有收到任何回复内容。请稍后再试。');
-        } else {
-            chatHistory.push({
-                role: 'assistant',
-                content: finalAssistantContent,
-                timestamp: assistantMessageElement.timestamp
-            });
-        }
-        
-        if (chatHistory.length > 20) {
-            chatHistory = chatHistory.slice(-20);
-        }
-
-        return { content: finalAssistantContent, model: selectedModel };
-        
     } catch (error) {
-        // 优雅地处理中止错误
         if (error.name === 'AbortError') {
-            console.log('Fetch 请求被用户中止。');
-            // 确保UI状态正确
-            if (assistantMessageElement && assistantMessageElement.textElement) {
-                assistantMessageElement.textElement.classList.remove('streaming');
-                const mainElement = assistantMessageElement.textElement.querySelector('.main-content-wrapper');
-                if (mainElement) {
-                    mainElement.classList.remove('streaming');
-                }
-                // 在中止时，如果完全没有内容，可以显示一条消息
-                if (!mainContent && !thinkingContent) {
-                     updateAssistantMessage(assistantMessageElement, '(回复已中止)');
-                }
+            console.log(`模型 ${modelId} 的请求被中止`);
+            isAborted = true;
+        } else {
+            console.error(`模型 ${modelId} 的流式请求失败:`, error);
+            if (thinkingAnimation) thinkingAnimation.remove();
+            if (assistantMessageElement) {
+                assistantMessageElement.innerHTML += `<p class="error">抱歉，加载回答时遇到问题: ${error.message}</p>`;
+            } else {
+                const errorElement = document.createElement('div');
+                errorElement.className = 'message-text error';
+                errorElement.textContent = `抱歉，请求失败: ${error.message}`;
+                messageContent.appendChild(errorElement);
             }
-            // 返回一个明确的中止状态
-            return { isAborted: true };
         }
-
-        console.error('流式API请求失败:', error);
-        
-        // 确保清理UI
-        if (assistantMessageElement.textElement) {
-            assistantMessageElement.textElement.classList.remove('streaming');
-            const thinkingElement = assistantMessageElement.textElement.querySelector('.thinking-process');
-            if (thinkingElement) thinkingElement.remove();
-            const mainElement = assistantMessageElement.textElement.querySelector('.main-content-wrapper');
-            if (mainElement) mainElement.remove();
-            
-            updateAssistantMessage(assistantMessageElement, '抱歉，发送消息时出现错误。请检查网络连接或稍后再试。');
-        }
-        
-        // 抛出错误，让上层处理
-        throw error;
+    } finally {
+        if (thinkingAnimation) thinkingAnimation.remove();
     }
+    
+    return { 
+        content: fullContent, 
+        isAborted: isAborted,
+        isStream: true
+    };
 }
 
 // 保留原有的非流式请求函数，以备需要时使用
 async function sendChatRequest(message, retryCount = 0) {
-    const selectedModel = elements.modelSelect.value;
-    
-    // 构建完整的对话历史
-    const messages = [];
-    
-    // 添加历史对话
-    for (const historyItem of chatHistory) {
-        if (historyItem.role === 'user' || historyItem.role === 'assistant') {
-            messages.push({
-                role: historyItem.role,
-                content: historyItem.content
-            });
-        }
-    }
-    
-    // 添加当前用户消息
-    messages.push({
-        role: 'user',
-        content: message
-    });
-    
+    // 非流式请求逻辑保持不变，但现在需要 modelId
+    // 在这个新架构中，我们优先使用流式请求，这个函数可能不会被频繁调用
+    const selectedModel = elements.modelSelect.value; // Fallback to single selection
+     const requestBody = {
+        model: selectedModel,
+        messages: [
+            ...chatHistory,
+            { role: 'user', content: message }
+        ],
+        stream: false
+    };
+
     try {
         const response = await fetch(CONFIG.API_URL, {
             method: 'POST',
@@ -820,12 +895,7 @@ async function sendChatRequest(message, retryCount = 0) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${CONFIG.API_KEY}`
             },
-            body: JSON.stringify({
-                model: selectedModel,
-                messages: messages,
-                temperature: 0.7,
-                max_tokens: 2000
-            })
+            body: JSON.stringify(requestBody)
         });
         
         if (!response.ok) {
@@ -859,17 +929,8 @@ async function sendChatRequest(message, retryCount = 0) {
 
 // 工具函数
 function getModelDisplayName(modelId) {
-    const modelNames = {
-        'gpt-4o': 'GPT-4o',
-        'gpt-4.5-preview': 'GPT-4.5 Preview',
-        'claude-sonnet-4-20250514': 'Claude Sonnet 4',
-        'claude-sonnet-4-20250514-thinking': 'Claude Sonnet 4 (Thinking)',
-        'gemini-2.5-pro': 'Gemini 2.5 Pro',
-        'deepseek-v3': 'DeepSeek V3',
-        'deepseek-r1': 'DeepSeek R1'
-    };
-    
-    return modelNames[modelId] || modelId;
+    const model = availableModels.find(m => m.id === modelId);
+    return model ? model.name : modelId;
 }
 
 function exportChatHistory() {
